@@ -3,7 +3,7 @@ import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
 val attendanceMain = "alpha.sig.AttendanceKt"
 
 plugins {
-    val kotlinVersion = "1.7.20"
+    val kotlinVersion = "1.8.10"
     kotlin("jvm") version kotlinVersion
     id("application")
     id("com.github.johnrengelman.shadow") version "5.2.0"
@@ -33,6 +33,7 @@ dependencies {
     }
     implementation("commons-codec:commons-codec:1.15")
     implementation(kotlin("stdlib-jdk8"))
+    implementation("com.squareup.moshi:moshi-kotlin:1.15.1")
 }
 
 sourceSets.main {
@@ -45,12 +46,6 @@ sourceSets.main {
 sourceSets.test {
     kotlin {
         srcDirs("test/kotlin")
-    }
-}
-
-tasks.compileKotlin {
-    kotlinOptions {
-        jvmTarget = "1.8"
     }
 }
 

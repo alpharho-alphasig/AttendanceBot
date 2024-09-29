@@ -1,5 +1,7 @@
 package alpha.sig
 
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import jakarta.xml.bind.JAXBElement
 import org.docx4j.openpackaging.io.SaveToZipFile
 import org.docx4j.openpackaging.packages.OpcPackage
@@ -16,26 +18,20 @@ import org.docx4j.wml.Tr
 import org.xlsx4j.jaxb.Context
 import org.xlsx4j.sml.STCellType
 import java.io.File
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
+import java.nio.file.Files
+import java.nio.file.Paths
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
-import java.util.*
-
-const val useTestDirectories = true
 
 // Update these!
 const val sheetName = "F2022"
-val minutesDirectory = File(
-    if (useTestDirectories) "/opt/bots/Attendance/testFiles/"
-    else "/zpool/docker/volumes/nextcloud_aio_nextcloud_data/_data/admin/files" +
-            "/NewDrive/ALPHA SIG GENERAL/01_CHAPTER MEETINGS/MEETING MINUTES/2022_FALL"
-)
-val outputFile = File(
-    if (useTestDirectories) "/opt/bots/Attendance/testFiles/Attendance Fall 2022.xlsx"
-    else "/zpool/docker/volumes/nextcloud_aio_nextcloud_data/_data/admin/files" +
-            "/NewDrive/ALPHA SIG PRUDENTIAL/07_VP OF COMMUNICATIONS/F2022/Attendance Fall 2022.xlsx"
-)
 
 typealias RosterNumber = Int
+
 data class Brother(val name: String, val attendance: String)
 
 fun findNewestMinutes(minutesDir: File): File? {
@@ -129,7 +125,7 @@ fun appendToSpreadsheet(brothers: Map<RosterNumber, Brother>, sheetFile: File): 
 
     // Go through all the rows excluding the first one
     for (row in sheetdata.row.subList(1)) {
-        val roster = row.c.first().v.toString().toInt()
+        val roster = row.c.first().v.toInt()
         val attendance = brothers[roster]?.attendance ?: continue
         val styleIndex = row.c.last().s
         // Add the new cell for the brother's attendance
@@ -153,7 +149,49 @@ fun appendToSpreadsheet(brothers: Map<RosterNumber, Brother>, sheetFile: File): 
     return spreadsheetPackage
 }
 
+fun getResultsFromSpreadsheet(spreadsheetPackage: SpreadsheetMLPackage): Map<RosterNumber, Pair<String, Float>> {
+    // Get the sheet and its data
+    val worksheetParts = getWorksheetParts(spreadsheetPackage)
+    val sheetId = spreadsheetPackage.workbookPart.contents.sheets.sheet.first { it.name == sheetName }.sheetId - 1
+    val sheetdata = worksheetParts[sheetId.toInt()].jaxbElement.sheetData
+
+    return sheetdata.row.associate { row ->
+        row.c.first().v.toInt() to Pair(row.c[1].v, row.c[2].v.toFloat())
+    }.toSortedMap()
+}
+
+fun sendDiscordMessage(msg: String, discordWebhookURL: String, debugMode: Boolean) {
+    print(msg)
+    if (!debugMode) {
+        val response = HttpClient.newHttpClient()
+            .send(
+                HttpRequest.newBuilder(URI.create(discordWebhookURL))
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"content\": \"$msg\"}"))
+                    .headers("Content-Type: application/json")
+                    .build(), HttpResponse.BodyHandlers.ofString()
+            )
+        println(response) // For debugging purposes
+    }
+}
+
+fun loadConfig(moshi: Moshi): Config {
+    return moshi.fromJson<Config>(Files.readString(Paths.get("opt", "bots", "config.json")))
+}
+
 fun main() {
+    val moshi = Moshi.Builder()
+        .add(KotlinJsonAdapterFactory())
+        .build()
+    val config = loadConfig(moshi)
+    val useTestDirectories = config.debugMode
+    val minutesDirectory = File(
+        if (useTestDirectories) "/opt/bots/Attendance/testFiles/"
+        else config.minutesFolder
+    )
+    val outputFile = File(
+        if (useTestDirectories) "/opt/bots/Attendance/testFiles/Attendance Fall 2022.xlsx"
+        else "${config.attendanceFolder}/${config.currentSemester.season.name.first()}${config.currentSemester.year}/Attendance ${config.currentSemester.season.name.titlecase()} ${config.currentSemester.year}.xlsx"
+    )
     val newestMinutes = findNewestMinutes(minutesDirectory)
     if (newestMinutes == null) {
         println("File not found in $minutesDirectory.")
@@ -161,6 +199,11 @@ fun main() {
     }
     val brothers = extractAttendanceFromDoc(newestMinutes)
     val sheetPkg = appendToSpreadsheet(brothers, outputFile)
+    val results = getResultsFromSpreadsheet(sheetPkg)
+    sendDiscordMessage("Attendance report:\n${results.map { (roster, result) ->
+        val (name, score) = result
+        "$roster, $name: $score${when { score >= 3 -> " (GBS)"; score >= 2 -> " (CBS)"; else -> ""}}"
+    }.joinToString("\n")}", config.attendanceDiscordURL, useTestDirectories)
     @Suppress("DEPRECATION")
     SaveToZipFile(sheetPkg).save(
         if (useTestDirectories) File("/opt/bots/Attendance/testFiles/Attendance Fall 2022 after.xlsx")
